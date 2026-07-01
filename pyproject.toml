@@ -1,0 +1,20 @@
+[project]
+name = "nvfp4-universal-quantizer"
+version = "0.1.0"
+description = "Mixed FP8 and NVFP4 quantization for SDXL, Wan 2.2, Qwen Image, Z-Image, FLUX, and FLUX.2 diffusion models in ComfyUI"
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
+]
+
+[project.urls]
+Repository = "https://github.com/thepororo/ComfyUI-NVFP4-Quantizer"
+Documentation = "https://github.com/thepororo/ComfyUI-NVFP4-Quantizer#readme"
+"Bug Tracker" = "https://github.com/thepororo/ComfyUI-NVFP4-Quantizer/issues"
+
+[tool.comfy]
+PublisherId = "y4236512"
+DisplayName = "Universal FP8 / NVFP4 Quantizer"
