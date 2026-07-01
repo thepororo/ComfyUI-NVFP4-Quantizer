@@ -2,6 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md)
 
+[![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom%20Node-2b2b2b)](https://www.comfy.org/)
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/thepororo)
+
 用于扩散模型 `.safetensors` 文件的独立 ComfyUI FP8/NVFP4 混合量化输出节点。
 
 ## 支持的架构
@@ -48,6 +51,16 @@ git clone https://github.com/thepororo/ComfyUI-NVFP4-Quantizer.git
 - 请使用原始 BF16/FP16 模型，不要重复量化。
 - 量化有损，请保留源模型并在正式使用前测试质量。
 - SDXL 卷积权重不是 2D Linear，因此不会转换为 NVFP4。
+
+## 支持开发
+
+如果此节点为您节省了 GPU 存储空间或实验时间，您可以通过
+[GitHub Sponsors](https://github.com/sponsors/thepororo) 支持兼容性测试、
+文档、错误修复和新架构支持。
+
+赞助完全自愿，不会解锁节点所需的功能。节点运行时不会显示捐赠弹窗或自动
+打开外部页面。维护者介绍、赞助原则和单独的付费实现支持请参阅
+[SUPPORT.md](SUPPORT.md)。
 
 ## 开发说明
 
