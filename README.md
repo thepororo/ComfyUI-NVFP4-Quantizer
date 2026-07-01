@@ -2,6 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md)
 
+[![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom%20Node-2b2b2b)](https://www.comfy.org/)
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/thepororo)
+
 A self-contained ComfyUI output node for mixed FP8/NVFP4 quantization of
 diffusion-model `.safetensors` files.
 
@@ -53,6 +56,17 @@ use NVFP4 because this implementation supports 2D Linear weights only.
 - Start from an original BF16/FP16 model, not an already quantized file.
 - Quantization is lossy. Keep the source model.
 - Test model quality before production use.
+
+## Support development
+
+If this node saves GPU storage or experimentation time, you can support
+compatibility testing, documentation, bug fixes, and new architecture support
+through [GitHub Sponsors](https://github.com/sponsors/thepororo).
+
+Sponsorship is optional. It never unlocks required node functionality and the
+node does not display donation pop-ups or open external pages while running.
+See [SUPPORT.md](SUPPORT.md) for the maintainer's story, sponsorship details,
+and separate paid implementation support.
 
 ## Development note
 
