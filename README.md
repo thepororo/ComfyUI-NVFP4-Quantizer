@@ -39,15 +39,48 @@ The output is written beside the selected source model. Leave
 
 ## Presets
 
+The package now provides separate nodes for SDXL, Wan 2.2, Qwen Image/Edit,
+Z-Image, FLUX, and FLUX.2. Each node exposes its architecture's major layer
+groups independently.
+
+- `conservative_nvfp4` (default): keeps sensitive and input/output layers in
+  their source dtype, uses safe FP8 weight-only storage for attention and
+  reduction paths, and applies NVFP4 only to large MLP/expansion paths.
+- `conservative_fp8`: keeps sensitive and input/output layers in their source
+  dtype and stores eligible major Linear weights as FP8 weight-only.
+- `custom`: enables all architecture-specific layer selectors.
+
+FP8 layers never use an implicit activation scale: matrix multiplication stays
+in the model compute dtype. NVFP4 tensor scales are forced positive, validated
+as finite, and paired with the native per-block FP8 scales. Already-quantized
+inputs are rejected.
+
 - `balanced`: attention FP8, FFN NVFP4, other large Linear layers FP8.
 - `quality`: attention FP8, FFN NVFP4, miscellaneous Linear layers BF16.
 - `aggressive`: attention and FFN NVFP4.
+- `qwen_edit_14_5gb`: Qwen Image/Edit 2511 profile targeting about 14.5 GB;
+  attention, FFN, and other large Linear layers use NVFP4, while `img_mod` and
+  `txt_mod` use FP8 and input/output embeddings remain BF16.
+- `qwen_edit_under_14gb`: more aggressive Qwen Image/Edit 2511 profile targeting
+  about 13.8 GB. It keeps modulation in the first and last 23 blocks at FP8 and
+  converts modulation in middle blocks 23–36 to NVFP4.
+- `qwen_edit_perceptual_hybrid`: quality-first Qwen Image/Edit 2511 profile.
+  Attention and MLP reduction projections use FP8 weight-only execution, MLP
+  expansion projections use NVFP4, modulation uses FP8 weight-only execution,
+  and input/output, norms, and biases remain BF16. It prioritizes style,
+  surface texture, and detail.
 - `fp8_all`: large eligible Linear layers FP8.
 - `custom`: use the individual format controls.
 
 Sensitive layers, small matrices, convolution weights, norms, and biases are
 protected according to the selected settings. SDXL convolution weights cannot
 use NVFP4 because this implementation supports 2D Linear weights only.
+
+FP8 layers are stored with per-tensor weight scaling and marked for
+full-precision matrix multiplication. This keeps activations in the model's
+compute dtype because this offline converter does not perform activation
+calibration or generate `input_scale` tensors. NVFP4 layers continue to use
+native block-scaled execution.
 
 ## Requirements and warnings
 
