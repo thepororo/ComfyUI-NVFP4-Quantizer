@@ -24,12 +24,25 @@ ARCHITECTURES = (
 )
 FORMATS = ("keep", "bf16", "fp16", "fp32", "fp8", "nvfp4")
 REGULAR_FORMATS = ("keep", "bf16", "fp16", "fp32")
-PRESETS = ("balanced", "quality", "aggressive", "fp8_all", "custom")
+ARCHITECTURE_PRESETS = ("conservative_nvfp4", "conservative_fp8", "custom")
+PRESETS = (
+    "balanced",
+    "quality",
+    "aggressive",
+    "qwen_edit_14_5gb",
+    "qwen_edit_under_14gb",
+    "qwen_edit_perceptual_hybrid",
+    "fp8_all",
+    "custom",
+)
 
 PRESET_FORMATS = {
     "balanced": ("fp8", "nvfp4", "fp8", "bf16", "bf16"),
     "quality": ("fp8", "nvfp4", "bf16", "bf16", "bf16"),
     "aggressive": ("nvfp4", "nvfp4", "fp8", "bf16", "bf16"),
+    "qwen_edit_14_5gb": ("nvfp4", "nvfp4", "nvfp4", "bf16", "bf16"),
+    "qwen_edit_under_14gb": ("nvfp4", "nvfp4", "nvfp4", "bf16", "bf16"),
+    "qwen_edit_perceptual_hybrid": ("fp8", "fp8", "bf16", "bf16", "bf16"),
     "fp8_all": ("fp8", "fp8", "fp8", "bf16", "bf16"),
 }
 
@@ -85,6 +98,31 @@ def is_sensitive(key):
     return any(token in k for token in tokens)
 
 
+def is_qwen_modulation(key):
+    k = normalize_key(key)
+    return bool(
+        re.search(
+            r"transformer_blocks\.\d+\.(?:img_mod|txt_mod)\.\d+\.weight$",
+            k,
+        )
+    )
+
+
+def is_qwen_mlp_expansion(key):
+    k = normalize_key(key)
+    return bool(
+        re.search(
+            r"transformer_blocks\.\d+\.(?:img_mlp|txt_mlp)\.net\.0\.proj\.weight$",
+            k,
+        )
+    )
+
+
+def qwen_block_id(key):
+    match = re.search(r"transformer_blocks\.(\d+)\.", normalize_key(key))
+    return None if match is None else int(match.group(1))
+
+
 def classify_weight(key, tensor, architecture):
     if not key.endswith(".weight") or not tensor.is_floating_point() or tensor.ndim != 2:
         return "nonquant"
@@ -132,6 +170,37 @@ def classify_weight(key, tensor, architecture):
     return "other_linear"
 
 
+def classify_role(key, tensor, architecture):
+    category = classify_weight(key, tensor, architecture)
+    if category == "nonquant":
+        return category
+    k = normalize_key(key)
+    if architecture == "qwen_image":
+        if is_qwen_modulation(key):
+            return "modulation"
+        if re.search(r"transformer_blocks\.\d+\.(?:img_mlp|txt_mlp)\.net\.0\.proj\.weight$", k):
+            return "mlp_expansion"
+        if re.search(r"transformer_blocks\.\d+\.(?:img_mlp|txt_mlp)\.net\.2\.weight$", k):
+            return "mlp_reduction"
+    elif architecture == "wan22":
+        if re.search(r"blocks\.\d+\.self_attn\.", k):
+            return "self_attention"
+        if re.search(r"blocks\.\d+\.cross_attn\.", k):
+            return "cross_attention"
+    elif architecture in ("flux", "flux2"):
+        if re.search(r"double_blocks\.\d+\.(?:img_attn|txt_attn)\.", k):
+            return "dual_attention"
+        if re.search(r"double_blocks\.\d+\.(?:img_mlp|txt_mlp)\.", k):
+            return "dual_mlp"
+        if re.search(r"single_blocks\.\d+\.linear1\.weight$", k):
+            return "single_expansion"
+        if re.search(r"single_blocks\.\d+\.linear2\.weight$", k):
+            return "single_reduction"
+    if category == "sensitive":
+        return category
+    return category
+
+
 def tensor_bytes(tensor, fmt):
     if fmt == "keep":
         return tensor.numel() * tensor.element_size()
@@ -162,10 +231,13 @@ def quantize_fp8(tensor):
     x = tensor.to("cuda", non_blocking=True).contiguous()
     if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         x = x.to(torch.bfloat16)
+    scale = torch.amax(x.abs()).to(torch.float32) / torch.finfo(torch.float8_e4m3fn).max
+    scale = torch.clamp(scale, min=torch.finfo(torch.float32).tiny)
     with torch.no_grad():
         qdata, params = TensorCoreFP8E4M3Layout.quantize(
-            x, scale="recalculate", stochastic_rounding=0, inplace_ops=False
+            x, scale=scale, stochastic_rounding=0, inplace_ops=False
         )
+    validate_quantized("FP8", qdata, params.scale)
     return (
         qdata.detach().cpu().contiguous(),
         params.scale.detach().cpu().to(torch.float32).reshape(()).contiguous(),
@@ -182,15 +254,32 @@ def quantize_nvfp4(tensor):
     x = tensor.to("cuda", non_blocking=True).contiguous()
     if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         x = x.to(torch.bfloat16)
+    import comfy_kitchen as ck
+    scale = torch.amax(x.abs()).to(torch.float32) / (
+        ck.float_utils.F8_E4M3_MAX * ck.float_utils.F4_E2M1_MAX
+    )
+    scale = torch.clamp(scale, min=torch.finfo(torch.float32).tiny)
     with torch.no_grad():
         qdata, params = TensorCoreNVFP4Layout.quantize(
-            x, scale="recalculate", stochastic_rounding=0, inplace_ops=False
+            x, scale=scale, stochastic_rounding=0, inplace_ops=False
         )
+    validate_quantized("NVFP4", qdata, params.scale, params.block_scale)
     return (
         qdata.detach().cpu().contiguous(),
         params.block_scale.detach().cpu().contiguous(),
         params.scale.detach().cpu().to(torch.float32).reshape(()).contiguous(),
     )
+
+
+def validate_quantized(label, qdata, *scales):
+    if qdata.numel() == 0:
+        raise RuntimeError(f"{label} produced an empty tensor")
+    for scale in scales:
+        values = scale.float()
+        if not torch.isfinite(values).all() or (values < 0).any():
+            raise RuntimeError(f"{label} produced an invalid scale")
+    if not torch.isfinite(scales[0].float()).all() or (scales[0].float() <= 0).any():
+        raise RuntimeError(f"{label} produced a non-positive tensor scale")
 
 
 def resolved_formats(preset, attention, ffn, other_linear, sensitive, nonquant):
@@ -208,6 +297,8 @@ def quantize_file(
     attention="fp8", ffn="nvfp4", other_linear="fp8",
     sensitive="bf16", nonquant="bf16", min_elements=65536,
     estimate_only=False,
+    layer_config=None,
+    profile_name=None,
 ):
     source = Path(input_path).expanduser().resolve()
     destination = Path(output_path).expanduser().resolve()
@@ -225,10 +316,22 @@ def quantize_file(
 
     with safe_open(str(source), framework="pt", device="cpu") as handle:
         old_metadata = handle.metadata() or {}
+        if "_quantization_metadata" in old_metadata:
+            raise ValueError("Input is already quantized; use the original BF16/FP16 model")
         keys = list(handle.keys())
         detected = detect_architecture(keys)
         selected = detected if architecture == "auto" else architecture
         classification_arch = "qwen_image" if selected == "qwen_image_edit" else selected
+        qwen_only_presets = (
+            "qwen_edit_14_5gb",
+            "qwen_edit_under_14gb",
+            "qwen_edit_perceptual_hybrid",
+        )
+        if preset in qwen_only_presets and classification_arch != "qwen_image":
+            raise ValueError(
+                f"{preset} is only valid for Qwen Image/Edit models. "
+                f"Selected architecture: {selected}"
+            )
         print(f"architecture: {selected} (detected: {detected})")
         print("formats:", ", ".join(f"{k}={v}" for k, v in formats.items()))
 
@@ -238,6 +341,19 @@ def quantize_file(
             input_bytes += tensor.numel() * tensor.element_size()
             category = classify_weight(key, tensor, classification_arch)
             fmt = formats[category]
+            role = classify_role(key, tensor, classification_arch)
+            if layer_config and role in layer_config:
+                fmt = layer_config[role]
+            if preset == "qwen_edit_14_5gb" and is_qwen_modulation(key):
+                category, fmt = "modulation", "fp8"
+            elif preset == "qwen_edit_under_14gb" and is_qwen_modulation(key):
+                block_id = qwen_block_id(key)
+                category = "modulation"
+                fmt = "nvfp4" if block_id is not None and 23 <= block_id <= 36 else "fp8"
+            elif preset == "qwen_edit_perceptual_hybrid" and is_qwen_modulation(key):
+                category, fmt = "modulation", "fp8"
+            elif preset == "qwen_edit_perceptual_hybrid" and is_qwen_mlp_expansion(key):
+                category, fmt = "mlp_expansion", "nvfp4"
             if category not in ("sensitive", "nonquant") and tensor.numel() < min_elements:
                 category, fmt = "sensitive", formats["sensitive"]
             if fmt in ("fp8", "nvfp4") and (tensor.ndim != 2 or not tensor.is_floating_point()):
@@ -254,7 +370,13 @@ def quantize_file(
             if fmt == "fp8":
                 q, scale = quantize_fp8(tensor)
                 out_sd[key], out_sd[key + "_scale"] = q, scale
-                quant_layers[normalize_key(key)[:-7]] = {"format": "float8_e4m3fn"}
+                quant_layers[normalize_key(key)[:-7]] = {
+                    "format": "float8_e4m3fn",
+                    # This converter does not calibrate activation input_scale.
+                    # Keep matrix multiplication in the compute dtype so ComfyUI
+                    # does not quantize activations with an implicit scale of 1.
+                    "full_precision_matrix_mult": True,
+                }
             elif fmt == "nvfp4":
                 q, scale, scale2 = quantize_nvfp4(tensor)
                 out_sd[key], out_sd[key + "_scale"], out_sd[key + "_scale_2"] = q, scale, scale2
@@ -285,7 +407,8 @@ def quantize_file(
         "converted_by": "ComfyUI-NVFP4-Universal-Quantizer",
         "architecture": selected,
         "detected_architecture": detected,
-        "preset": preset,
+        "preset": profile_name or preset,
+        "layer_config": json.dumps(layer_config or {}, ensure_ascii=False),
     })
     destination.parent.mkdir(parents=True, exist_ok=True)
     save_file(out_sd, str(destination), metadata=metadata)
@@ -306,11 +429,15 @@ def main():
     parser.add_argument("--nonquant", choices=REGULAR_FORMATS, default="bf16")
     parser.add_argument("--min-elements", type=int, default=65536)
     parser.add_argument("--estimate-only", action="store_true")
+    parser.add_argument("--layer-config", default="{}")
+    parser.add_argument("--profile-name", default="")
     args = parser.parse_args()
     quantize_file(
         args.input, args.output, args.architecture, args.preset,
         args.attention, args.ffn, args.other_linear, args.sensitive,
         args.nonquant, args.min_elements, args.estimate_only,
+        json.loads(args.layer_config),
+        args.profile_name or None,
     )
 
 
